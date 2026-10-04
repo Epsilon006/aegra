@@ -14,6 +14,7 @@ import json
 import sys
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict, TypeVar, cast
 from uuid import uuid5
@@ -22,7 +23,7 @@ import structlog
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
-from sqlalchemy import select, update
+from sqlalchemy import func, select
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -260,19 +261,34 @@ class LangGraphService:
             for graph_id, graph_config in self._graph_registry.items():
                 assistant_id = str(uuid5(NS, graph_id))
                 description = graph_config.get("description", f"Default assistant for graph '{graph_id}'")
-                existing = await session.scalar(select(AssistantORM).where(AssistantORM.assistant_id == assistant_id))
+                existing = await session.scalar(
+                    select(AssistantORM).where(AssistantORM.assistant_id == assistant_id).with_for_update()
+                )
                 if existing:
                     if existing.description != description:
-                        existing.description = description
-                        # Keep the active snapshot in sync without rewriting historical versions.
-                        await session.execute(
-                            update(AssistantVersionORM)
-                            .where(
-                                AssistantVersionORM.assistant_id == assistant_id,
-                                AssistantVersionORM.version == existing.version,
+                        max_version = await session.scalar(
+                            select(func.max(AssistantVersionORM.version)).where(
+                                AssistantVersionORM.assistant_id == assistant_id
                             )
-                            .values(description=description)
                         )
+                        new_version = max(existing.version, max_version or 0) + 1
+                        now = datetime.now(UTC)
+                        session.add(
+                            AssistantVersionORM(
+                                assistant_id=assistant_id,
+                                version=new_version,
+                                name=existing.name,
+                                description=description,
+                                graph_id=existing.graph_id,
+                                config=existing.config,
+                                context=existing.context,
+                                metadata_dict=existing.metadata_dict,
+                                created_at=now,
+                            )
+                        )
+                        existing.description = description
+                        existing.version = new_version
+                        existing.updated_at = now
                     continue
                 session.add(
                     AssistantORM(
@@ -605,7 +621,7 @@ class LangGraphService:
                 # base graph is needed later for schema extraction, _get_base_graph
                 # will call _call_factory_with_defaults lazily.
                 self._graph_factories[graph_id] = graph
-                return
+                return None
 
         return graph
 
