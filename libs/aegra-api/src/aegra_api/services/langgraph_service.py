@@ -22,8 +22,12 @@ import structlog
 from langgraph.graph import StateGraph
 from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
+from sqlalchemy import select, update
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
+from aegra_api.core.orm import Assistant as AssistantORM
+from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
+from aegra_api.core.orm import get_session
 from aegra_api.models.auth import User
 from aegra_api.observability.base import (
     get_tracing_callbacks,
@@ -49,7 +53,7 @@ class GraphConfigEntry(TypedDict):
     """Object form of a graph configuration entry."""
 
     path: str
-    description: NotRequired[str]
+    description: NotRequired[str | None]
 
 
 class GraphRegistryEntry(TypedDict):
@@ -83,11 +87,10 @@ def _parse_graph_config_entry(graph_id: str, graph_config: object) -> GraphRegis
         graph_path = graph_config_data["path"]
         if not isinstance(graph_path, str):
             raise ValueError(f"Graph '{graph_id}' field 'path' must be a string")
-        if "description" in graph_config_data:
-            raw_description = graph_config_data["description"]
-            if not isinstance(raw_description, str):
-                raise ValueError(f"Graph '{graph_id}' field 'description' must be a string")
-            description = raw_description
+        raw_description = graph_config_data.get("description")
+        if raw_description is not None and not isinstance(raw_description, str):
+            raise ValueError(f"Graph '{graph_id}' field 'description' must be a string or null")
+        description = raw_description
     else:
         raise ValueError(f"Graph '{graph_id}' configuration must be a string or object")
 
@@ -244,32 +247,38 @@ class LangGraphService:
                 logger.warning(f"Dependency path does not exist: {path_str}")
 
     async def _ensure_default_assistants(self) -> None:
-        """Create a default assistant per graph with deterministic UUID.
+        """Create default assistants and sync their configured descriptions.
 
         Uses uuid5 with a fixed namespace so that the same graph_id maps
         to the same assistant_id across restarts. Idempotent.
         """
-        from sqlalchemy import select
-
-        from aegra_api.core.orm import Assistant as AssistantORM
-        from aegra_api.core.orm import AssistantVersion as AssistantVersionORM
-        from aegra_api.core.orm import get_session
-
         # Fixed namespace used to derive assistant IDs from graph IDs
         NS = ASSISTANT_NAMESPACE_UUID
         session_gen = get_session()
         session = await anext(session_gen)
         try:
-            for graph_id in self._graph_registry:
+            for graph_id, graph_config in self._graph_registry.items():
                 assistant_id = str(uuid5(NS, graph_id))
+                description = graph_config.get("description", f"Default assistant for graph '{graph_id}'")
                 existing = await session.scalar(select(AssistantORM).where(AssistantORM.assistant_id == assistant_id))
                 if existing:
+                    if existing.description != description:
+                        existing.description = description
+                        # Keep the active snapshot in sync without rewriting historical versions.
+                        await session.execute(
+                            update(AssistantVersionORM)
+                            .where(
+                                AssistantVersionORM.assistant_id == assistant_id,
+                                AssistantVersionORM.version == existing.version,
+                            )
+                            .values(description=description)
+                        )
                     continue
                 session.add(
                     AssistantORM(
                         assistant_id=assistant_id,
                         name=graph_id,
-                        description=f"Default assistant for graph '{graph_id}'",
+                        description=description,
                         graph_id=graph_id,
                         config={},
                         user_id="system",
@@ -281,7 +290,7 @@ class LangGraphService:
                         assistant_id=assistant_id,
                         version=1,
                         name=graph_id,
-                        description=f"Default assistant for graph '{graph_id}'",
+                        description=description,
                         graph_id=graph_id,
                         metadata_dict={"created_by": "system"},
                     )
