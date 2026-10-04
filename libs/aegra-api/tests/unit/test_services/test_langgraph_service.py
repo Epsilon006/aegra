@@ -233,13 +233,23 @@ class TestLoadGraphRegistry:
             "export_name": "graph",
         }
 
+    def test_treats_null_description_as_absent(self) -> None:
+        service = LangGraphService()
+        service.config = {"graphs": {"agent": {"path": "./graphs/agent.py:graph", "description": None}}}
+
+        service._load_graph_registry()
+
+        assert service._graph_registry["agent"] == {
+            "file_path": "./graphs/agent.py",
+            "export_name": "graph",
+        }
+
     @pytest.mark.parametrize(
         ("graph_config", "message"),
         [
             ({"description": "Missing path"}, "missing required 'path'"),
             ({"path": 42}, "field 'path' must be a string"),
             ({"path": "./agent.py:graph", "description": 42}, "field 'description' must be a string"),
-            ({"path": "./agent.py:graph", "description": None}, "field 'description' must be a string"),
             (42, "configuration must be a string or object"),
             ({"path": "./agent.py"}, "Invalid graph path format"),
             ({"path": ":graph"}, "Invalid graph path format"),
