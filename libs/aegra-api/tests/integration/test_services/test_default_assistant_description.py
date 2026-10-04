@@ -33,7 +33,7 @@ async def test_http_reads_description_after_startup_sync(
         updated_at=datetime.now(UTC),
     )
     session = MagicMock(spec=AsyncSession)
-    session.scalar.return_value = existing
+    session.scalar.side_effect = [existing, 1, existing]
 
     async def session_dependency() -> AsyncIterator[AsyncSession]:
         yield session
@@ -56,3 +56,4 @@ async def test_http_reads_description_after_startup_sync(
         description if description is not None else "Default assistant for graph 'agent'"
     )
     assert response.json()["user_id"] == "system"
+    assert response.json()["version"] == 2
