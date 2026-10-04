@@ -103,7 +103,9 @@ Each value can be a string import path or an object with a required `path` and o
 | Key | `string` | Graph ID (used in API calls to identify the graph) |
 | Value | `string \| object` | String import path or graph configuration object |
 | `path` | `string` | Required in object form; import path in format `./path/to/file.py:variable` |
-| `description` | `string` | Optional graph description available to adapters and discovery tooling |
+| `description` | `string \| null` | Optional. Used as the description of the graph's default assistant. |
+
+The default assistant's description is synchronized on startup when this value changes. If omitted or `null`, it falls back to `Default assistant for graph '<graph_id>'`. An empty string is preserved as an explicit description.
 
 The variable can be:
 
